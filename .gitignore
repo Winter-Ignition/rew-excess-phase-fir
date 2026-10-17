@@ -1,0 +1,13 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+measurements/
+outputs/
+work/
+*.wav
+*.npz
+*.csv
+*.zip
+.env
+.env.*

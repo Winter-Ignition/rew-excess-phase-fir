@@ -1,0 +1,4 @@
+interface:
+  display_name: "REW 剩余相位校准"
+  short_description: "从 REW 原始脉冲测量生成剩余相位 FIR，检查前振铃并展示校准效果"
+  default_prompt: "使用 $rew-excess-phase-fir 引导我准备 REW 测量，生成并验收剩余相位校准滤波。"
