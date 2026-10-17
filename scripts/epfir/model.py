@@ -41,6 +41,9 @@ def fit(a,c):
         a['notes'].append('位于可拟合频带外的分频点不作硬约束。')
     known=[float(x) for x in known if 8<=float(x)<8000]
     counts=sorted(set([max(0,len(known)),max(1,len(known))])) if known else [0,1,2,3]
+    if c.get('existing_phase_correction')=='this_filter':
+        # 分频先验描述物理系统；已校准后的残差不必再含一份分频旋转。
+        counts=sorted(set([0]+counts))
     records=[]
     for k in counts:
         seeds=known if len(known)==k else np.geomspace(650,4200,k).tolist()

@@ -4,6 +4,7 @@ from scipy.ndimage import gaussian_filter1d
 from scipy.signal import find_peaks
 from .common import db,power2,minimum,smooth,runs,fractional_peak,ease
 from .inputs import load
+from .low_reference import reference as low_reference,model_spread
 
 def direct_peak(h,fs,declared=None):
     if declared is not None:
@@ -88,6 +89,18 @@ def phase_views(f,phase,valid,uncertainty,c):
 
 def analyze(ch,c):
     source=load(ch,c['max_fft_samples']);meta=source['meta'];notes=[]
+    if source['kind']=='frd' and source['fs']>48000:
+        ff=source['f'];mag=source['mag'];mid=(ff>=200)&(ff<=3000);ultra=(ff>=30000)&(ff<=min(80000,source['fs']*.45))
+        if ultra.sum()>20 and np.median(mag[ultra])<np.median(mag[mid])-35:
+            # 超声已为噪声时，不让长段噪声平台决定可听频带最小相位参考。
+            # 统一为 48k 分析规约；输出采样率仍服从请求，且不改播放延迟。
+            native=source['fs'];spectrum=np.fft.rfft(source['samples']);n=int(round(len(source['samples'])*48000/native))
+            if n%2==0 and len(spectrum)>=n//2+1:
+                spectrum=spectrum[:n//2+1].copy();spectrum[-1]=spectrum[-1].real
+                source={**source,'samples':np.fft.irfft(spectrum,n),'fs':48000.}
+                meta.update(native_export_sample_rate=native,analysis_reference_sample_rate=48000,
+                    ultrasonic_noise_policy='48k_audible_band_reference_not_physical_ultrasonic_reconstruction')
+                notes.append('超声段由噪声主导：采用 48 kHz 可听带分析参考；低端/高端延伸仍是模型规约，非真实带外响应。')
     low=float(ch['min_usable_hz']);native_ir=None;native_fs=None
     if source['kind']=='excess':
         fn=source['f'];pn=source['phase'];mn=source['mag']
@@ -150,14 +163,21 @@ def analyze(ch,c):
             else:
                 notes.append('麦克风仅有幅度校准：相位分析保留自洽原始复响应，不猜测麦克风相位。')
                 meta['microphone_phase_policy']='raw_chain_excess_microphone_excess_unknown'
-        M=minimum(abs(phase_transfer),nfft)
+        cutoff=ch.get('measurement_valid_low_hz',c.get('measurement_valid_low_hz'))
+        extended,low_model=low_reference(fn,abs(phase_transfer),cutoff,ch.get('frozen_low_reference'))
+        M=minimum(extended,nfft)
+        spread=model_spread(fn,abs(phase_transfer),low_model,nfft)
+        meta['low_reference']=low_model
+        if cutoff is None:
+            notes.append('有效测量低频下限未知：保留全频带参考，低端绝对剩余相位未认证；建议补充噪声截止点。')
         min_peak=fractional_peak(np.fft.irfft(M,nfft))
         # 同时处理实测和最小相位峰规约。纯最小相位+传播延迟应得到零剩余相位。
         removal=peak-min_peak
         if source['kind']=='frd':
             removal=(removal+nfft/2)%nfft-nfft/2
         Z=phase_transfer/M*np.exp(2j*np.pi*fn*removal/fs)
-        Ma=minimum(abs(alt_H),nfft)
+        alt_mag,_=low_reference(fn,abs(alt_H),cutoff,low_model if cutoff is not None else None)
+        Ma=minimum(alt_mag,nfft)
         Za=alt_H/Ma*np.exp(2j*np.pi*fn*removal/fs)
         window_sensitivity=abs(np.angle(Za/Z))
         if source['kind']=='frd':
@@ -171,6 +191,9 @@ def analyze(ch,c):
                 ff2=np.fft.rfftfreq(nfft*2,1/fs)
                 mag2=abs(np.fft.rfft(h,nfft*2))/10**(np.interp(ff2,cal[:,0],cal[:,1])/20)
                 M2=minimum(mag2,nfft*2)
+        ff2=np.fft.rfftfreq(nfft*2,1/fs)
+        ext2,_=low_reference(ff2,np.interp(ff2,fn,abs(phase_transfer)),cutoff,low_model if cutoff is not None else None)
+        M2=minimum(ext2,nfft*2)
         fft_sensitivity=abs(np.angle(M2[::2]/M))
         # 尾噪是保守估计，不声明它可以分辨所有时钟、谐波或工频污染。
         if source['kind']=='ir' and peak>fs*.01:
@@ -183,6 +206,8 @@ def analyze(ch,c):
             # 周期重建 IR 的尾部可能是负时间直达能量，不能拿它估计采集底噪。
             native_snr=np.full(len(H),np.nan)
         valid_native=(fn>=max(2,source.get('f',np.array([2]))[0]))&(fn<=fs*.49)
+        if cutoff is not None:
+            valid_native&=fn>=cutoff
         if source['kind']=='ir':
             valid_native&=native_snr>8
         raw_unwrapped=segment_unwrap(Z,valid_native)
@@ -191,11 +216,21 @@ def analyze(ch,c):
         phi=np.interp(f,fn,raw_unwrapped);mag=np.interp(f,fn,db(H))
         snr=np.interp(f,fn,native_snr)
         uncertainty=np.interp(f,fn,window_sensitivity+fft_sensitivity)
+        meta['low_reference_phase_spread_deg']=dict(frequency_hz=[low, max(low,80.),300.],
+            max_deviation_deg=np.rad2deg(np.interp([low,max(low,80.),300.],fn,spread)).tolist())
         notch=mag-smooth(f,mag,1/3)
         evidence=np.full(len(f),.75) if source['kind']=='frd' else np.clip((snr-8)/24,0,1)
         confidence=evidence*np.exp(-(uncertainty/np.deg2rad(15))**2)
         confidence*=ease((notch+20)/12)
+        # 深陷波不作精确反演，邻域仍保留可视化而非裁掉峰值。
+        confidence*=.04+.96*ease((notch-c.get('notch_threshold_db',-6.))/4.)
+        if cutoff is not None:
+            confidence*=ease((f-cutoff)/max(2.,cutoff*.2))
         confidence*=1-ease((f-min(10000,fs*.20))/max(1,fs*.49-min(10000,fs*.20)))
+        mid=(f>=200)&(f<=3000)
+        hf_noise=ease((mag-float(np.median(mag[mid]))+40)/15)
+        confidence*=np.where(f>=10000,hf_noise,1.)
+        confidence[f>ch.get('measurement_valid_high_hz',22000.)]=0
         # 导出相位通常在低频噪声处不可靠；不让它影响展开锚点。
         if ambiguous:
             confidence*=.5;notes.append('早期峰与最大峰存在歧义；建议在脉冲图确认直达峰。')
@@ -207,7 +242,7 @@ def analyze(ch,c):
     upper_usable=ch.get('max_usable_hz',120. if ch.get('role')=='lfe' else c['independent_end_hz'])
     if ch.get('role')=='lfe' or upper_usable<c['independent_end_hz']:
         confidence*=1-ease((f-upper_usable*.9)/(upper_usable*.1))
-    valid=(confidence>.08)&(f>=max(5,low*.7))
+    valid=(confidence>.08)&(f>=max(5,low*.7,ch.get('measurement_valid_low_hz') or 0))
     input_valid=valid.copy()
     phi,selected,candidates,width,selection,coherence,good=phase_views(f,phi,valid,uncertainty,c)
     confidence*=ease((coherence-.25)/.5);valid&=good

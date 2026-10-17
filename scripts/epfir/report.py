@@ -32,7 +32,7 @@ def build(analyses,c,out,acceptance=None):
         ax.legend();ax.grid(alpha=.2)
         ax=axes[1,col];ax.semilogx(f,np.where(a['valid'],np.rad2deg(phi),np.nan),color='#777777',label='校准前')
         ax.semilogx(f,np.where(a['valid'],np.rad2deg(phase_after),np.nan),color='#0072B2',label='应用后预测')
-        ax.set(xlim=(max(20,a['min_usable_hz']),min(10000,f[-1])),ylabel='连续剩余相位 / °',xlabel='频率 / Hz',title='复数矢量平滑后展开；灰区不连线')
+        ax.set(xlim=(max(20,a['min_usable_hz']),min(c['pair_end_hz'],f[-1])),ylabel='连续剩余相位 / °',xlabel='频率 / Hz',title='复数矢量平滑后展开；灰区不连线')
         ax.grid(alpha=.2);ax.legend()
         ax=axes[2,col]
         if actual:
@@ -63,6 +63,8 @@ def build(analyses,c,out,acceptance=None):
         ax.set_ylim(min(x[0] for x in limits),max(x[1] for x in limits))
     fig.suptitle('剩余相位校准 · 系数与预测验收（尚未做应用后声学复测）',fontsize=16)
     fig.savefig(out/'overview.png',dpi=155);plt.close(fig)
+    from .transitions import build as transition_report
+    transition_report(analyses,c,out)
     multiscale=all('selected_global_smooth_phase' in a for a in analyses)
     if multiscale:
         fig,axes=plt.subplots(2,count,figsize=(7*count,7),squeeze=False,layout='constrained')
@@ -74,7 +76,7 @@ def build(analyses,c,out,acceptance=None):
             ax.semilogx(f,np.where(visible,np.rad2deg(a['predicted_phase']),np.nan),color='#0072B2',label='整体 + 局部，实际 FIR 预测')
             ax.set(xlim=(low,10000),xlabel='Hz',ylabel='剩余相位 / °',title=a['name']+'：应用后残余相位放大');ax.legend();ax.grid(alpha=.2)
             ax=axes[1,col]
-            ax.semilogx(f,np.rad2deg(a['selected_global_smooth_phase']),color='#884EA0',label='先验模型之外的整体慢变校准')
+            ax.semilogx(f,np.rad2deg(a['selected_global_smooth_phase']),color='#884EA0',label='整体平滑校准（含先验和高频连接）')
             ax.semilogx(f,np.rad2deg(a['selected_local_phase']),color='#009E73',label='局部细节校准')
             ax.axvline(limit,color='#555',ls='--',label=f'局部上限 {limit:.0f} Hz')
             ax.set(xlim=(low,10000),xlabel='Hz',ylabel='校准相位 / °',title='整体跨过局部上限；局部在上限前归零');ax.legend();ax.grid(alpha=.2)
@@ -109,16 +111,16 @@ def build(analyses,c,out,acceptance=None):
             a,b=lookup[l],lookup[r];f=np.geomspace(8000,min(22000,a['f'][-1],b['f'][-1]),600)
             left=np.interp(f,a['f'],a['normalized_phase']);right=np.interp(f,b['f'],b['normalized_phase'])
             pair_valid=(np.interp(f,a['f'],a['valid'].astype(float))>.999)&(np.interp(f,b['f'],b['valid'].astype(float))>.999)
-            ca=np.interp(f,a['actual']['f'],a['actual']['phase']) if a.get('actual') else np.zeros(len(f))
-            cb=np.interp(f,b['actual']['f'],b['actual']['phase']) if b.get('actual') else np.zeros(len(f))
+            ca=np.interp(f,a['f'],a['actual_residual_phase']) if a.get('actual') else np.zeros(len(f))
+            cb=np.interp(f,b['f'],b['actual_residual_phase']) if b.get('actual') else np.zeros(len(f))
             predicted_left=np.interp(f,a['f'],a.get('predicted_phase',a['normalized_phase']))
             predicted_right=np.interp(f,b['f'],b.get('predicted_phase',b['normalized_phase']))
             axes[row,0].plot(f,np.where(pair_valid,wrapped(left-right),np.nan),color='#777',label='校准前相位差')
             axes[row,0].plot(f,np.where(pair_valid,wrapped(predicted_left-predicted_right),np.nan),color='#0072B2',label='应用后预测相位差')
             axes[row,0].set(title=l+'/'+r+'：10 kHz 附近优先缩小差异；无效区留空',xlabel='Hz',ylabel='左右差 / °',xlim=(f[0],f[-1]));axes[row,0].legend()
             hf=f>=10000
-            axes[row,1].plot(f[hf],np.rad2deg((ca[hf]+cb[hf])/2),label='共同校准量（应近 0°）')
-            axes[row,1].set(title='10 kHz 以上保留共同相位',xlabel='Hz',ylabel='校准相位均值 / °');axes[row,1].set_xlim(10000,f[-1]);axes[row,1].legend()
+            axes[row,1].plot(f[hf],np.rad2deg((ca[hf]+cb[hf])/2),label='共同校准量（平滑接回，非全程 0°）')
+            axes[row,1].set(title='10 kHz 以上共同趋势平滑衔接',xlabel='Hz',ylabel='校准相位均值 / °');axes[row,1].set_xlim(10000,f[-1]);axes[row,1].legend()
         fig.savefig(out/'hf_pairs.png',dpi=150);plt.close(fig)
     fig,axes=plt.subplots(1,count,figsize=(7*count,3.5),squeeze=False,layout='constrained')
     for col,a in enumerate(analyses):
@@ -135,7 +137,7 @@ def build(analyses,c,out,acceptance=None):
     fig.savefig(out/'input_peaks.png',dpi=150);plt.close(fig)
     write_json(out/'analysis_summary.json',records)
     metrics=html.escape(json.dumps(clean(acceptance or {}),ensure_ascii=False,indent=2))
-    images=[('overview.png','总览'),('diagnostics.png','平滑与时间图'),('input_peaks.png','输入脉冲峰')]
+    images=[('overview.png','总览'),('transitions.png','300–400 Hz 与 8–10 kHz 衔接'),('diagnostics.png','平滑与时间图'),('input_peaks.png','输入脉冲峰')]
     if multiscale:
         images.insert(1,('multiscale.png','整体慢变校准与局部细节分工'))
     if c.get('pairs'):

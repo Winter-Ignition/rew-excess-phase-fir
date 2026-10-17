@@ -113,7 +113,9 @@ def load(ch,max_fft):
     # 明确声明的原始全通测量可以平直，不能仅凭幅度平直推翻类型声明。
     meta['flat_magnitude_type_declared']=bool(np.ptp(mag)<.2)
     fs=ch.get('measurement_sample_rate')
-    delta=float(np.median(np.diff(f)));linear=np.max(abs(f-np.arange(1,len(f)+1)*delta))<.03*delta
+    # 导出的小数舍入使逐点中位步长积累误差；用全跨度估计线性网格步长。
+    delta=float((f[-1]-f[0])/(len(f)-1));first=round(f[0]/delta)
+    linear=np.max(abs(f-(np.arange(len(f))+first)*delta))<.03*delta
     if not linear and not ch.get('phase_unwrapped',False):
         raise ValueError('非线性/稀疏网格的包裹总相位可能已发生时间混叠；请导出原生 IR、密集线性频点，或真正未包裹相位并声明 phase_unwrapped=true。')
     if fs is None:
@@ -123,7 +125,9 @@ def load(ch,max_fft):
             raise ValueError('该 FRD 无法可靠推断采样率，请声明 measurement_sample_rate')
         fs=float(candidate);meta['sample_rate_inferred']=True
     lowest=float(ch.get('min_usable_hz',40))
-    if f[0]>lowest/16 or f[-1]<.499*fs:
+    cutoff=ch.get('measurement_valid_low_hz')
+    low_complete=f[0]<=lowest/16 or (cutoff is not None and f[0]<=cutoff and linear)
+    if not low_complete or f[-1]<.499*fs:
         raise ValueError('FRD 未保留足够的低频/奈奎斯特边界，带外延伸可能伪造剩余相位；请改用原生 IR，或导出完整原始 FFT 频带（首频点不高于最低可用频率的 1/16，高端接近采样率的一半）。')
     if linear:
         nfft=int(round(fs/delta))

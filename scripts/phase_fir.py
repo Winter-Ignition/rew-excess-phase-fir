@@ -16,7 +16,7 @@ from epfir.multiscale import prepare
 def save_arrays(analyses,out):
     arrays={}
     for a in analyses:
-        for key in ['f','phase','phase_raw','normalized_phase','nuisance_phase','confidence','valid','smoothing_width','smoothing_selection','smoothing_input_valid','vector_coherence','smooth_candidates','magnitude_db','uncertainty_rad','h','baseline_h','predicted_phase','predicted_gd_ms','baseline_predicted_phase','baseline_predicted_gd_ms','selected_global_smooth_phase','selected_local_phase']:
+        for key in ['f','phase','phase_raw','normalized_phase','nuisance_phase','confidence','valid','smoothing_width','smoothing_selection','smoothing_input_valid','vector_coherence','smooth_candidates','magnitude_db','uncertainty_rad','h','baseline_h','predicted_phase','predicted_gd_ms','baseline_predicted_phase','baseline_predicted_gd_ms','selected_global_smooth_phase','selected_local_phase','loaded_h','residual_target','actual_residual_phase','notch_mask']:
             if key in a:
                 arrays[a['name']+'__'+key]=a[key]
     np.savez_compressed(Path(out)/'analysis.npz',**arrays)
@@ -32,8 +32,13 @@ def run(mode,path,out):
     pair_models(analyses,c)
     if mode=='analyze':
         save_arrays(analyses,out);build(analyses,c,out);return dict(report=str(out/'report.html'))
-    for a in analyses:
-        print('生成并筛选 '+a['name'],flush=True);design(a,c)
+    from epfir.unified import design_group
+    lookup={a['name']:a for a in analyses}
+    paired=set(sum(c.get('pairs',[]),[]))
+    groups=c.get('pairs',[])+[[a['name']] for a in analyses if a['name'] not in paired]
+    for group in groups:
+        print('联合生成并筛选 '+','.join(group),flush=True)
+        design_group([lookup[n] for n in group],c)
     lookup={a['name']:a for a in analyses}
     save_arrays(analyses,out)
     paired=set(sum(c.get('pairs',[]),[]));groups=c.get('pairs',[])+[[a['name']] for a in analyses if a['name'] not in paired]
@@ -42,8 +47,8 @@ def run(mode,path,out):
     for name in identity:
         h=np.zeros(c['taps'],np.float32);h[c['delay_samples']]=1;coeff[name]=h;groups.append([name])
     settings={k:v for k,v in c.items() if k not in ['channels','pairs','unprocessed_channels']}
-    manifest=dict(version=1,status='candidate',settings=settings,pairs=c.get('pairs',[]),identity_channels=identity,
-                  channels={a['name']:dict(min_usable_hz=a['min_usable_hz'],model=a['model'],source=a['metadata'],design=a['design_metrics'],
+    manifest=dict(version=2,role='complete_replacement' if c.get('loaded_filters') else 'complete',replaces=c.get('loaded_filters',[]),status='candidate',settings=settings,pairs=c.get('pairs',[]),identity_channels=identity,
+                  channels={a['name']:dict(min_usable_hz=a['min_usable_hz'],model=a['model'],source=a['metadata'],design=a['design_metrics'],low_reference=a['metadata'].get('low_reference'),
                         calibration_ranges=a['calibration_ranges'],global_regularization=a['global_regularization']) for a in analyses},
                   files=[],mount=c.get('mount','full_channel_series'),
                   note='每个逻辑声道只应用一次完整滤波；延迟表不负责系统物理对齐。')
@@ -68,9 +73,18 @@ def compare(path,reference,out):
     from scipy.optimize import least_squares
     c=request(path,remeasure=True);ref=Path(reference);old=np.load(ref/'analysis.npz',allow_pickle=False)
     manifest=json.loads((ref/'manifest.json').read_text(encoding='utf-8'));original=manifest['settings']
+    if manifest.get('version')!=2:
+        old.close()
+        raise ValueError('compare 需要 v2 配套参考清单；不能混用 v1 报告规约')
     out=Path(out);out.mkdir(parents=True,exist_ok=True);result={}
     for ch in c['channels']:
-        a=analyze(ch,c);name=ch['name'];f=old[name+'__f'];width=old[name+'__smoothing_width']
+        name=ch['name']
+        model=manifest['channels'][name].get('low_reference')
+        if model and model.get('models'):
+            ch={**ch,'frozen_low_reference':model,'measurement_valid_low_hz':model['cutoff_hz']}
+        for setting in ['smoothing_octaves','adaptive_smoothing','window_pre_ms','window_post_ms']:
+            c[setting]=original[setting]
+        a=analyze(ch,c);f=old[name+'__f'];width=old[name+'__smoothing_width']
         phi=np.interp(f,a['f'],a['phase_raw'])
         if name+'__smoothing_input_valid' not in old:
             raise ValueError('该参考包使用旧版标量平滑，需要先重新分析，不能混用验收规约。')
@@ -85,14 +99,28 @@ def compare(path,reference,out):
         def timing_error(v):
             e=chosen[fitband]-expected[fitband]-2*np.pi*f[fitband]*v[0]*1e-6
             return np.r_[np.sin(e),1-np.cos(e)]
-        timing=least_squares(timing_error,[0.],bounds=(-1000.,1000.),loss='soft_l1',f_scale=.1).x[0]
+        grid=np.linspace(-1000.,1000.,2001)
+        seed=min(grid,key=lambda t:float(np.mean(timing_error([t])**2)))
+        timing=least_squares(timing_error,[seed],bounds=(-1000.,1000.),loss='soft_l1',f_scale=.1).x[0]
         chosen=frozen_phase(f,phi-2*np.pi*f*timing*1e-6,input_valid,selection,original)[0]
         gd=-np.gradient(chosen,f)/(2*np.pi)*1000;mask=(f>=max(40,ch['min_usable_hz']))&(f<=300)&(conf>.12)
         gd0=-np.gradient(old[name+'__normalized_phase'],f)/(2*np.pi)*1000
         result[name]=dict(before_rms_ms=float(np.sqrt(np.mean(gd0[mask]**2))),remeasured_rms_ms=float(np.sqrt(np.mean(gd[mask]**2))),
                           analysis_reference_difference_us=float(timing),
                           note='对齐预测和复测的线性时间规约；这不是实际声道延迟测量，不用于播放延迟设置。')
-        np.savetxt(out/(name+'_remeasure.csv'),np.c_[f,gd0,gd,conf],delimiter=',',header='Hz,before_ms,remeasured_ms,confidence',comments='')
+        bands={}
+        for lo,hi in [(ch['min_usable_hz'],80),(80,300),(300,400),(400,1000),(1000,8000),(8000,10000),(10000,18000)]:
+            band=(f>=lo)&(f<=hi)&(conf>.12)&input_valid
+            if band.sum()<5:continue
+            circular=np.rad2deg(np.angle(np.exp(1j*chosen[band])))
+            error=np.rad2deg(np.angle(np.exp(1j*(chosen[band]-expected[band]))))
+            bands[f'{lo:g}-{hi:g}']=dict(valid_points=int(band.sum()),phase_rms_deg=float(np.sqrt(np.mean(circular**2))),
+                gd_rms_ms=float(np.sqrt(np.mean(gd[band]**2))),prediction_error_rms_deg=float(np.sqrt(np.mean(error**2))))
+        result[name]['bands']=bands
+        result[name]['low_reference']=a['metadata'].get('low_reference')
+        result[name]['interpretation']='逐频带判断；不能用相位 RMS 改善代替群延时峰谷或空间复测验收'
+        np.savetxt(out/(name+'_remeasure.csv'),np.c_[f,gd0,gd,conf,chosen,expected],delimiter=',',header='Hz,before_ms,remeasured_ms,confidence,remeasured_phase_rad,expected_phase_rad',comments='')
+    old.close()
     write_json(out/'remeasurement.json',result);return result
 
 def main():

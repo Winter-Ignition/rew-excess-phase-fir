@@ -69,14 +69,30 @@ DEFAULTS=dict(sample_rate=192000,taps=16384,max_latency_ms=42.67,smoothing_octav
     local_depth=1.,optimize=True,max_fft_samples=4194304,existing_phase_correction='off',
     window_pre_ms=20.,window_post_ms=1000.,fdw_cycles=4.,max_far_pre_energy=.005,
     max_added_pre_energy=.0005,transition_max_added_gd_ms=.25,transition_rms_added_gd_ms=.12,
-    local_detail_cap_hz=300.,global_basis_sigma_octaves=.65,global_regularization=3.,
-    local_highpass_octaves=.8,phase_framework='multiscale_regularized_v2')
+    local_detail_cap_hz=300.,global_basis_sigma_octaves=.35,global_regularization=.8,
+    local_highpass_octaves=.8,phase_framework='unified_v2',measurement_valid_low_hz=None,
+    hf_pair_tolerance_deg=5.,hf_transition_max_gd_us=40.,composition_max_phase_deg=2.,
+    notch_threshold_db=-6.,notch_max_added_phase_deg=8.)
 
 def request(path,remeasure=False):
     p=Path(path).resolve();r=json.loads(p.read_text(encoding='utf-8-sig'))
     c={**DEFAULTS,**r};channels=c.get('channels',[])
     if not channels:
         raise ValueError('请求里缺少 channels；每个逻辑声道需要一个输入文件。')
+    if c.get('reference_directory'):
+        q=Path(c['reference_directory']);q=(p.parent/q).resolve() if not q.is_absolute() else q.resolve()
+        reference=json.loads((q/'manifest.json').read_text(encoding='utf-8'))
+        if reference.get('version')!=2:
+            raise ValueError('冻结参考目录需要 v2 清单；v1 WAV 可单独作为 loaded_filters 输入')
+        for key in ['smoothing_octaves','adaptive_smoothing','window_pre_ms','window_post_ms']:
+            c[key]=reference['settings'][key]
+        for ch in channels:
+            frozen=reference['channels'][ch['name']].get('low_reference')
+            if frozen and frozen.get('models'):
+                declared=ch.get('measurement_valid_low_hz',c['measurement_valid_low_hz'])
+                if declared is not None and declared!=frozen['cutoff_hz']:
+                    raise ValueError('冻结参考的噪声下限不一致；不能重新拟合后作同一规约比较')
+                ch.update(frozen_low_reference=frozen,measurement_valid_low_hz=frozen['cutoff_hz'])
     for key in ['sample_rate','taps','max_fft_samples']:
         if not isinstance(c[key],int):
             raise ValueError(f'{key} 必须为整数')
@@ -87,17 +103,22 @@ def request(path,remeasure=False):
             raise ValueError(f'{key} 必须为有限数值')
     if not 0<=c['local_depth']<=1 or c['max_latency_ms']<0:
         raise ValueError('延迟不得为负，校准强度须在 0–1 之间')
-    if not 0<c['min_usable_hz']<c['lf_stop_hz']<=c['independent_transition_hz']<c['independent_end_hz']<c['sample_rate']/2:
+    if not (0<c['min_usable_hz']<c['independent_end_hz']<c['sample_rate']/2 and
+            0<c['lf_stop_hz']<=c['independent_transition_hz']<c['independent_end_hz']):
         raise ValueError('校准频带次序或输出采样率不正确')
     if not c['independent_end_hz']<c['pair_end_hz']<c['sample_rate']/2:
         raise ValueError('左右高频差分退出频率须高于独立校准上限')
-    if c['existing_phase_correction'] not in (('off','none','this_filter') if remeasure else ('off','none')):
+    if c['existing_phase_correction'] not in ('off','none','this_filter'):
         raise ValueError('先关闭待替换的混合/剩余相位校正，再使用相同状态的测量。')
+    if c['existing_phase_correction']=='this_filter' and not remeasure and not c.get('loaded_filters'):
+        raise ValueError('带旧 FIR 的复测需要 loaded_filters，不能当作未校准测量生成完整替换文件')
+    if c.get('loaded_filters') and c['existing_phase_correction']!='this_filter':
+        raise ValueError('loaded_filters 仅适用于明确声明 this_filter 的复测')
     head=c['head_half_ranges_cm']
     if head is not None and (len(head)!=3 or not np.isfinite(head).all() or min(head)<0):
         raise ValueError('头部范围需为三个非负半范围，单位厘米')
     labels=set();hashes=set()
-    for key in ['max_gain_error_db','stop_gain_error_db','stop_phase_error_deg','window_pre_ms','window_post_ms','fdw_cycles','max_far_pre_energy','max_added_pre_energy','smoothing_octaves','transition_max_added_gd_ms','transition_rms_added_gd_ms','local_detail_cap_hz','global_basis_sigma_octaves','global_regularization','local_highpass_octaves']:
+    for key in ['max_gain_error_db','stop_gain_error_db','stop_phase_error_deg','window_pre_ms','window_post_ms','fdw_cycles','max_far_pre_energy','max_added_pre_energy','smoothing_octaves','transition_max_added_gd_ms','transition_rms_added_gd_ms','local_detail_cap_hz','global_basis_sigma_octaves','global_regularization','local_highpass_octaves','hf_pair_tolerance_deg','hf_transition_max_gd_us','composition_max_phase_deg','notch_max_added_phase_deg']:
         if not np.isfinite(c[key]) or c[key]<=0:
             raise ValueError(f'{key} 必须为有限正数')
     if not 0<c['lf_local_high_hz']<c['lf_stop_hz'] or c['max_fft_samples']<2*c['taps']:
@@ -113,9 +134,15 @@ def request(path,remeasure=False):
             raise ValueError('不同声道指向了完全相同的数据；请核对左右导出，不能把复制文件当作独立测量。')
         hashes.add(ident)
         ch.setdefault('kind','auto');ch.setdefault('min_usable_hz',c['min_usable_hz'])
+        ch.setdefault('measurement_valid_low_hz',c['measurement_valid_low_hz'])
+        cutoff=ch['measurement_valid_low_hz']
+        if cutoff is not None:
+            if not np.isfinite(cutoff) or not 0<cutoff<ch.get('max_usable_hz',c['independent_end_hz']):
+                raise ValueError('有效测量低频下限必须为有限正数且低于声道上限')
+            ch['min_usable_hz']=max(ch['min_usable_hz'],cutoff)
         ch.setdefault('max_usable_hz',120. if ch.get('role')=='lfe' else c['independent_end_hz'])
-        if not np.isfinite(ch['min_usable_hz']) or not 0<ch['min_usable_hz']<c['lf_local_high_hz']:
-            raise ValueError('声道最低可用频率超出局部校准范围')
+        if not np.isfinite(ch['min_usable_hz']) or not 0<ch['min_usable_hz']<ch['max_usable_hz']:
+            raise ValueError('声道最低可用频率必须低于声道上限')
         if not np.isfinite(ch['max_usable_hz']) or not ch['min_usable_hz']<ch['max_usable_hz']<c['sample_rate']/2:
             raise ValueError('声道最高可用频率不正确')
         if ch.get('calibration'):
@@ -134,6 +161,19 @@ def request(path,remeasure=False):
     if c.get('bass_management') and c.get('mount') not in ('before_bass_management','common_all_branches'):
         raise ValueError('有低音管理时，先确认 FIR 位于低音重定向之前，或同一输入的所有支路共用该 FIR。')
     c['delay_samples']=min(c['taps']//2,int(np.floor(c['max_latency_ms']*c['sample_rate']/1000+1e-8)))
+    loaded_names=set()
+    for item in c.get('loaded_filters',[]):
+        q=Path(item['path']);item['path']=str((p.parent/q).resolve() if not q.is_absolute() else q.resolve())
+        if sha(item['path'])!=item.get('sha256'):
+            raise ValueError('已加载 FIR 的 SHA256 不符；不能猜测实际使用版本')
+        mapping=item.get('channels',[])
+        if not mapping or set(mapping)&loaded_names or not set(mapping)<=labels:
+            raise ValueError('已加载 FIR 声道映射重复、缺失或未知')
+        loaded_names.update(mapping)
+        if item.get('delay_samples')!=c['delay_samples']:
+            raise ValueError('旧 FIR 必须声明与新 FIR 相同的公共延迟；不自动改变系统延迟')
+    if c.get('loaded_filters') and loaded_names!=labels:
+        raise ValueError('每个被校准声道都需要实际已加载 FIR 的映射')
     c['range_basis']=dict(min_usable_source='request' if 'min_usable_hz' in r else 'default',
         core_high_source='request' if 'lf_local_high_hz' in r else 'default',
         stop_source='request' if 'lf_stop_hz' in r else 'default',

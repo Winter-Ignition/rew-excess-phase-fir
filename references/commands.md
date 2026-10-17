@@ -1,6 +1,6 @@
-# 请求格式与命令
+# v2 请求与命令
 
-Python 3.10+，依赖 `numpy scipy soundfile matplotlib`。将命令的 `python` 换成已验证的解释器绝对路径；从本 Skill 的 `scripts/phase_fir.py` 运行。
+Python 3.10+，依赖见 `requirements.txt`。使用已经验证的本地解释器，不改全局环境。
 
 ```text
 python scripts/phase_fir.py inspect left.txt right.txt
@@ -8,12 +8,14 @@ python scripts/phase_fir.py analyze request.json --out analysis-run
 python scripts/phase_fir.py design request.json --out design-run
 python scripts/phase_fir.py verify design-run
 python scripts/phase_fir.py compare remeasure.json --reference design-run --out remeasure-run
-python scripts/test_phase_fir.py
+python -m unittest discover -s scripts -p "test_*.py"
 ```
 
-每次生成用新目录，不覆盖已有 manifest。`analyze` 不输出 WAV；`design` 包含分析、生成、实际回读验收和报告。非零退出码表示未完成或验收失败，失败目录的候选 WAV 不算已通过。
+每次生成用新目录。`design` 包含实际 WAV 验收；非零退出的候选不算通过。
 
-请求示例仅用合成名称，相对路径以 JSON 所在目录为准：
+## 新基线
+
+相对路径均相对 JSON 所在目录。以下为通用参数示例，不代表系统测量。
 
 ```json
 {
@@ -21,33 +23,60 @@ python scripts/test_phase_fir.py
   "taps": 16384,
   "max_latency_ms": 42.67,
   "min_usable_hz": 40,
+  "measurement_valid_low_hz": 25,
   "head_half_ranges_cm": [10, 10, 10],
   "existing_phase_correction": "off",
   "channels": [
     {"name":"L", "path":"left.txt", "kind":"frd", "measurement_sample_rate":48000, "crossover_hz":[2000]},
-    {"name":"R", "path":"right.txt", "kind":"frd", "measurement_sample_rate":48000, "crossover_hz":[2000]}
+    {"name":"R", "path":"right.txt", "kind":"frd", "measurement_sample_rate":48000, "crossover_hz":[]}
   ],
-  "pairs": [["L", "R"]],
-  "unprocessed_channels": []
+  "pairs": [["L", "R"]]
 }
 ```
 
-`kind=ir` 为 WAV/标准 REW 单列 IR 文本；`frd` 为原始总相位三列；`excess` 为已有剩余相位三列。WAV 用 `input_channel` 从 0 起选声道。
+`min_usable_hz` 是实际音量下最低不失真频率；`measurement_valid_low_hz` 是非噪声主导的测量下限。实际校准起点取二者较高值，可逐声道覆盖。噪声下限不能由扫频起点或音箱标称下潜直接替代。未知可省略/null，但会明确低频参考未认证。低频等效延伸的候选与敏感度保存在本地分析摘要。
 
-原始 FRD 采用密集线性频点；稀疏/对数网格仅接受真实未包裹相位并声明 `phase_unwrapped:true`，且需填写测量采样率。不要把包裹相位只改标签来绕过检查。明确声明 `frd` 时允许幅度平直的真实全通测量，自动检测会提示核对类型。
+`kind=ir`：浮点 WAV 或保留头部的 REW 单列原始 IR；`frd`：频率、dB、总相位三列；`excess`：已计算的剩余相位，不再分解。WAV 可用 `input_channel` 从 0 起选声道。稀疏/对数包裹总相位会拒绝；确实未包裹才声明 `phase_unwrapped:true`。密集 FRD 保留全 FFT 高端；低端优先完整，若裁切则需明确噪声边界、首点不高于该边界且保持密集线性网格。不能只改类型标签绕过检查。
 
-无论是否包裹，FRD 还需完整频带边界（首频点 ≤最低可用频率/16、高端 ≥采样率×.499）；10–22 kHz 的裁切导出改用原生 IR。此检查避免已在合成真值试验中观察到的带外延伸误校准。
+`crossover_hz` 可未知 `[]`，三分频可填两个近似点。`max_usable_hz` 限制窄带声道；`measurement_valid_high_hz` 默认 22000，标注可信测量高端。`role:lfe` 默认上限 120 Hz，独立处理，不是共享低音炮物理输出。`pairs` 支持多个不重叠配对，中置等不配对；`unprocessed_channels` 输出相同公共纯延迟。
 
-每声道可覆盖 `min_usable_hz`、`max_usable_hz`；`crossover_hz` 为列表，未知 `[]`，三分频填两个近似点。多配对如 `[["L","R"],["SL","SR"]]`，中置不配对。真正的 LFE 逻辑输入可设置 `role:lfe`（最高可用频率默认 120 Hz，可覆盖），按单侧校准并在其上限退出；它不是共享低音炮输出。窄带声道使用其可用频点拟合，不能把带外噪声当作真实高频剩余相位。
+## 已加载 FIR 后的复测重做
 
-`smoothing_octaves` 默认 1/6，`adaptive_smoothing=true`。统一慢变基底使用 `global_basis_sigma_octaves=.65`、`global_regularization=3`；这些与分析用的 1/6 平滑不同。局部细节上限为 `min(local_detail_cap_hz=300,头动保守估计频率)`，`local_depth` 为 0–1；`local_highpass_octaves=.8` 将慢变偏移从局部目标中去掉。旧的 `lf_local_high_hz=300`、`lf_stop_hz=400` 只保留作低频统计/显示范围，不再决定完整滤波或局部项的退出范围。每声道实际范围见 manifest 的 `calibration_ranges`。
+请求沿用声道测量和参数，改为：
 
-`optimize=true` 按实际系数搜索。`max_gain_error_db=.03`，`stop_gain_error_db=.005`，`stop_phase_error_deg=.1`。带外检查从实际局部上限开始，对比包含完整慢变校准的基线。`transition_max_added_gd_ms=.25`、`transition_rms_added_gd_ms=.12` 限制局部退出后的额外起伏。`max_far_pre_energy=.005`、`max_added_pre_energy=.0005` 是提前 1 ms 总能量/增量预算，不是听觉无感阈值。延迟少则减弱局部结构，无法形成有效补偿会退出。
+```json
+{
+  "existing_phase_correction": "this_filter",
+  "reference_directory": "previous-v2-design",
+  "loaded_filters": [
+    {
+      "path": "previous-complete.wav",
+      "sha256": "实际旧 WAV 的 SHA256",
+      "channels": ["L", "R"],
+      "delay_samples": 8192
+    }
+  ]
+}
+```
 
-IR 可声明 `direct_peak_s`（从首样本计）、`timing_reference` 和 `time_origin_s`。已应用的麦克风校准不重复输入；确定尚未应用且有可信复校准才传 `calibration:{"path":"mic.txt","trust_phase":true}` 和 `calibration_state:"not_applied"`。只有幅度校准时不猜相位，按自洽原始链分析并注明麦克风自身剩余相位未知。
+此片段需合并进完整请求。`loaded_filters.channels` 是该 WAV 从左到右的声道映射，必须覆盖所有设计声道且不重复。旧 WAV 采样率/长度必须匹配，近全通且只有相同的公共参考延迟。缺文件、哈希错误、映射不全或状态矛盾时停止，不猜版本。可直接输入 v1 WAV，但 `reference_directory` 仅接受 v2 配套清单；无原参考时明确新的低端参考不能与旧报告直接作绝对值比较。
 
-低音管理增加 `bass_management:true`、`mount:"before_bass_management"`（推荐）或 `common_all_branches`，工作记录保留分频点。不能把各输入的不同 FIR 装到共享低音炮输出。`unprocessed_channels` 导出相同公共纯延迟，不能替用户做真实到达时间对齐。
+`reference_directory` 冻结低端模型形状、窗口和平滑设置；只允许导出相对电平变化，不重拟合模型形状。新文件是 `H_new ≈ H_loaded × C_residual` 的一次定长重渲染，保留一份公共延迟。它是完整替换文件，播放时移除旧文件。
 
-输出完整 WAV、`manifest.json` 声道清单、独立 `acceptance.json`、私有 `analysis.npz`、CSV、PNG 和离线 HTML。每份 WAV 的 `role=complete`，只加载一次。
+若只是验证已交付效果，使用 `compare`、`existing_phase_correction:this_filter` 和原设计目录，不需要提供旧 FIR 再生成。它按分频带报告相位、群延时及预测偏差，线性时间差只用于分析。
 
-复测请求可设 `existing_phase_correction:"this_filter"` 表示只打开本次交付滤波，其他待替换的相位音效仍关闭；这个状态仅 `compare` 接受，不能再用它生成叠加补偿。比较固定原先全部平滑混合权重，并只在分析中对齐复测的线性时间规约，不修改播放延迟。
+## 约束和输出
+
+默认分析平滑 `smoothing_octaves=1/6`、`adaptive_smoothing=true`。宽带 Gaussian 基底 sigma `.35` 倍频程、间隔 `.25`、曲率惩罚 `.8`；与分析平滑不同。局部上限为 `min(local_detail_cap_hz=300,头动估计,声道上限)`，未知移动范围保守取 200 Hz。`local_depth=0..1`，`local_highpass_octaves=.8`；300/400 Hz 旧字段仅用于统计/图示，不是宽带退出点。
+
+默认 `max_gain_error_db=.03`；局部带外 `stop_gain_error_db=.005`、`stop_phase_error_deg=.1`。局部退出新增群延时峰值 `.25 ms`、RMS `.12 ms`。提前 1 ms 总能量 `max_far_pre_energy=.005`、局部增量 `max_added_pre_energy=.0005`；替换时额外与旧实际 FIR 比较 1 ms 和 5 ms 提前能量。它们是工程预算，不是听觉无感阈值。
+
+`pair_end_hz=20000` 是可配置高频退出上限，实际候选受可信频带限制，不固定为该频率。默认高频残余左右差 P95 ≤5°，8–10 kHz 群延时峰 ≤40 µs 或不明显恶化的原值；这些是系数预测门限，不能冒充声学复测通过。组合相位误差默认 ≤2°，300 Hz 以上 ≤.3°；有限长度不能表示的目标会拒绝。
+
+`notch_threshold_db=-6` 标识相对 1/3 倍频程背景的陷波，降低拟合权重；低频陷波处实际新增相位默认不超过 8°。若整体平滑校准在陷波处也需要较大相位，要看图判断；不能为了过验收直接放宽阈值。
+
+`direct_peak_s` 指定从文件首样本计的直达峰。可信且尚未应用的复麦克风校准可声明 `calibration:{"path":"mic.txt","trust_phase":true}` 与 `calibration_state:not_applied`。不重复校准，不猜只有幅度表的麦克风相位。
+
+低音管理声明 `bass_management:true`，挂载点 `mount:before_bass_management` 或 `common_all_branches`，同一输入所有分支使用同一 FIR；不在共享低音炮输出叠多个输入各自校准。
+
+输出完整 FLOAT WAV、`manifest.json`、`acceptance.json`、本地 `analysis.npz`、曲线、PNG 和离线 HTML。保持这些文件配套供复测。首次使用和最终交付均须提醒启用 FIR 后重新测量、重新校准频响。

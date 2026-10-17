@@ -22,10 +22,10 @@ def trend(a,reference,c):
     """在整段可信频带拟合慢变残差；头部范围不削弱这个基底。"""
     f=a['f'];r=a['normalized_phase']-reference;band=ranges(a,c)
     low=band['global_low_hz'];high=band['global_high_hz'];start=band['global_transition_start_hz']
-    centers=np.arange(np.log2(low*.7),np.log2(start)+.25,.5)
+    centers=np.arange(np.log2(low*.7),np.log2(high)+.25,.25)
     width=float(c.get('global_basis_sigma_octaves',.65))
     # 不使用带外测量作反演，只把拟合出的边界平顺延伸至 DC，避免硬起点的长尾。
-    guard=ease(f/low)*(1-ease((f-start)/(high-start)))
+    guard=ease(f/low)
     B=np.exp(-.5*((np.log2(f)[:,None]-centers)/width)**2)*guard[:,None]
     valid=(f>=low)&(f<=start)&a['valid']&(a['confidence']>.12)
     if valid.sum()<25:
@@ -44,7 +44,7 @@ def trend(a,reference,c):
         error=rows@coeff-target
         weight=original*np.sqrt(np.minimum(1,np.deg2rad(7)/np.maximum(abs(error),1e-12)))
     result=B@coeff
-    metadata=dict(basis='log_frequency_gaussian_rbf',spacing_octaves=.5,sigma_octaves=width,
+    metadata=dict(basis='log_frequency_gaussian_rbf',spacing_octaves=.25,sigma_octaves=width,
                   roughness_penalty=lam,robust_iterations=3,coefficients=coeff,
                   centers_hz=2**centers,head_weight_applied=False,
                   residual_rms_deg=float(np.rad2deg(np.sqrt(np.mean((rows@coeff-target)**2)))))
@@ -88,7 +88,7 @@ def prepare(a,c):
     variants=[]
     for name,reference in references:
         delta,metadata=trend(a,reference,c)
-        variants.append(dict(name=name,reference=reference,parametric_target=-reference*guard,
+        variants.append(dict(name=name,reference=reference,parametric_target=-reference,
                              smooth_target=-delta,smooth_forward=delta,regularization=metadata))
     a['global_variants']=variants;a['calibration_ranges']=band
     return a
