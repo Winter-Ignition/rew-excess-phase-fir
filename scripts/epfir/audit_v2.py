@@ -63,9 +63,9 @@ def audit(directory,write=True):
                 composition_above300_error_deg=peak(comp[core&(freq>=300)]),
                 prediction_replay_error_deg=peak(np.rad2deg(np.angle(np.exp(1j*(p-get('predicted_phase')))))[core]),
                 relative_pre_energy_increase=float(ring(co,1)-ring(base,1)),old_pre_1ms_energy_fraction=ring(old,1))
-            for lo,hi in [(300,400),(8000,10000)]:
+            for key,lo,hi in [('local_boundary_band',limit,min(high,limit*1.34)),('upper_core_band',min(8000,high*.8),high)]:
                 mask=(freq>=lo)&(freq<=hi)&valid
-                metrics[f'band_{lo}_{hi}']=dict(valid_points=int(mask.sum()),phase_peak_deg=peak(np.rad2deg(p[mask])),gd_peak_ms=peak(gd[mask]))
+                metrics[key]=dict(frequency_hz=[lo,hi],valid_points=int(mask.sum()),phase_peak_deg=peak(np.rad2deg(p[mask])),gd_peak_ms=peak(gd[mask]))
             if metrics['local_stop_gain_db']>c['stop_gain_error_db'] or metrics['local_stop_phase_deg']>c['stop_phase_error_deg']:
                 fail.append(name+' 局部项带外泄漏超限')
             if metrics['transition_added_gd_peak_ms']>c['transition_max_added_gd_ms'] or metrics['transition_added_gd_rms_ms']>c['transition_rms_added_gd_ms']:

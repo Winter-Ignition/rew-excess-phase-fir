@@ -137,7 +137,7 @@ def build(analyses,c,out,acceptance=None):
     fig.savefig(out/'input_peaks.png',dpi=150);plt.close(fig)
     write_json(out/'analysis_summary.json',records)
     metrics=html.escape(json.dumps(clean(acceptance or {}),ensure_ascii=False,indent=2))
-    images=[('overview.png','总览'),('transitions.png','300–400 Hz 与 8–10 kHz 衔接'),('diagnostics.png','平滑与时间图'),('input_peaks.png','输入脉冲峰')]
+    images=[('overview.png','全频段总览'),('band_detail.png','按校准范围显示的频段细节'),('diagnostics.png','平滑与时间图'),('input_peaks.png','输入脉冲峰')]
     if multiscale:
         images.insert(1,('multiscale.png','整体慢变校准与局部细节分工'))
     if c.get('pairs'):

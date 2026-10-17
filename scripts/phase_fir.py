@@ -109,7 +109,7 @@ def compare(path,reference,out):
                           analysis_reference_difference_us=float(timing),
                           note='对齐预测和复测的线性时间规约；这不是实际声道延迟测量，不用于播放延迟设置。')
         bands={}
-        for lo,hi in [(ch['min_usable_hz'],80),(80,300),(300,400),(400,1000),(1000,8000),(8000,10000),(10000,18000)]:
+        for lo,hi in [(ch['min_usable_hz'],80),(80,300),(300,1000),(1000,5000),(5000,10000),(10000,18000)]:
             band=(f>=lo)&(f<=hi)&(conf>.12)&input_valid
             if band.sum()<5:continue
             circular=np.rad2deg(np.angle(np.exp(1j*chosen[band])))

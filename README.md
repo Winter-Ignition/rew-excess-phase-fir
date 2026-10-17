@@ -10,7 +10,7 @@ Local excess-phase analysis and near-allpass FIR design for REW measurements. Su
 
 - Extracts excess phase from native impulse responses or dense magnitude/total-phase exports. Defaults to 1/6-octave complex-vector smoothing, with wrap and window sensitivity checks.
 - Separates the speaker's lowest undistorted frequency from the measurement's noise-dominated lower boundary. Fits an equivalent low-end magnitude extension without using observations below that boundary; records alternative-model sensitivity.
-- Solves broad phase correction across the usable lower bound to 10 kHz. Faster local group-delay detail is restricted to the lower of 300 Hz and a head-movement estimate; 300–400 Hz is not a separate wideband exit.
+- Solves broad phase correction across the usable lower bound to 10 kHz. Faster local group-delay detail is restricted to the lower of 300 Hz and a head-movement estimate; this local limit does not restrict broad correction.
 - Fits channels independently. Smoothly joins the common correction above 10 kHz and reduces paired-channel differences near 10 kHz, without forcing all higher-frequency excess phase to zero. Exit frequencies follow available trusted bandwidth.
 - Can revise measurements made with a previous FIR. Requires the actual loaded coefficients, hash, channel mapping and common delay; exports one complete replacement rather than another layer.
 - Defaults to 192 kHz, 16384 taps, float32 WAV and 42.67 ms common reference delay. Reads exported coefficients back for gain, advance-energy, transition, composition and symmetry checks, including direct DTFT cross-checks.
